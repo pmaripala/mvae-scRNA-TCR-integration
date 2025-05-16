@@ -1,0 +1,151 @@
+---
+title: "DataPreprocessing"
+author: "Pradeep"
+date: "2025-04-26"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+# Load necessary libraries
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+
+# --- Step 1: Load Matrix1 and Matrix2 ---
+
+# Update the paths below to point to your actual data locations
+matrix1_path <- "/Users/pradeepmaripala/Downloads/Deep_Learning_Projec/scRNA/matrix1"
+matrix2_path <- "/Users/pradeepmaripala/Downloads/Deep_Learning_Projec/scRNA/matrix2"
+
+# Load matrix1
+features1 <- read.delim(file.path(matrix1_path, "features.tsv.gz"), header=FALSE)
+barcodes1 <- read.delim(file.path(matrix1_path, "barcodes.tsv.gz"), header=FALSE)
+matrix1 <- readMM(file.path(matrix1_path, "matrix.mtx.gz"))
+colnames(matrix1) <- barcodes1$V1
+rownames(matrix1) <- features1$V2
+
+# Load matrix2
+features2 <- read.delim(file.path(matrix2_path, "features.tsv.gz"), header=FALSE)
+barcodes2 <- read.delim(file.path(matrix2_path, "barcodes.tsv.gz"), header=FALSE)
+matrix2 <- readMM(file.path(matrix2_path, "matrix.mtx.gz"))
+colnames(matrix2) <- barcodes2$V1
+rownames(matrix2) <- features2$V2
+
+# --- Step 2: Create Seurat Objects ---
+
+df1.raw <- Read10X(data.dir = "/Users/pradeepmaripala/Downloads/Deep_Learning_Projec/scRNA/matrix1")
+df2.raw <- Read10X(data.dir = "/Users/pradeepmaripala/Downloads/Deep_Learning_Projec/scRNA/matrix2")
+
+seurat1 <- CreateSeuratObject(counts = df1.raw, project = "dataset1")
+seurat2 <- CreateSeuratObject(counts = df2.raw, project = "dataset2")
+
+# Add metadata to distinguish datasets
+seurat1$orig.ident <- "dataset1"
+seurat2$orig.ident <- "dataset2"
+
+# --- Step 3: Preprocessing (Filtering, Normalization, HVGs) ---
+
+seurat_list <- list(seurat1, seurat2)
+
+# for (i in 1:length(seurat_list)) {
+#   seurat_list[[i]] <- NormalizeData(seurat_list[[i]])
+#   seurat_list[[i]] <- FindVariableFeatures(seurat_list[[i]], selection.method = "vst", nfeatures = 2000)
+# }
+seurat1$percent.mt <- PercentageFeatureSet(object = seurat1, pattern = "^mt-")
+seurat2$percent.mt <- PercentageFeatureSet(object = seurat2, pattern = "^mt-")
+
+seurat1 <- subset(seurat1, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+seurat2 <- subset(seurat2, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+seurat1 <- NormalizeData(seurat1)
+seurat1 <- FindVariableFeatures(seurat1)
+seurat2 <- NormalizeData(seurat2)
+seurat2 <- FindVariableFeatures(seurat2)
+
+# --- Step 4: Integration (Using Anchors) ---
+
+features <- SelectIntegrationFeatures(object.list = list(seurat1,seurat2))
+anchors <- FindIntegrationAnchors(object.list = list(seurat1,seurat2),anchor.features = features)
+# anchors <- FindIntegrationAnchors(object.list = seurat_list, dims = 1:30)
+integrated <- IntegrateData(anchorset = anchors)
+
+# Set the default assay to "integrated"
+DefaultAssay(integrated) <- "integrated"
+
+# --- Step 5: PCA and UMAP ---
+
+integrated <- ScaleData(integrated, verbose = FALSE)
+# integrated <- RunPCA(integrated, npcs = 30, verbose = FALSE)
+integrated <- RunPCA(integrated)
+# integrated <- RunUMAP(integrated, reduction = "pca", dims = 1:30)
+integrated <- RunUMAP(integrated,dims=1:30)
+
+# --- Step 6: Clustering (optional) ---
+
+integrated <- FindNeighbors(integrated, dims = 1:30)
+# integrated <- FindClusters(integrated, resolution = 0.5)
+integrated <- FindClusters(integrated,dims=1:30)
+# --- Step 7: Plot UMAP with split.by orig.ident ---
+
+p<-DimPlot(
+  integrated, 
+  reduction = "umap", 
+  label = TRUE, 
+  split.by = "orig.ident", 
+  pt.size = 0.65
+) + ggtitle("Integrated UMAP split by Dataset")
+ggsave("Integrated_UMAP.png", p, width = 12, height = 8)
+
+# --- Step 8: Save Integrated Object for Later (optional) ---
+
+saveRDS(integrated, file = "output/integrated_seurat_object.rds")
+```
+
+```{r}
+# SaveMatrixForPython.R
+
+# Load Seurat
+library(Seurat)
+
+# Load the integrated Seurat object
+integrated <- readRDS("output/integrated_seurat_object.rds")
+
+# --- Step 1: Save RNA expression matrix (integrated assay) ---
+
+# We will save normalized & scaled expression matrix
+expr_matrix <- as.data.frame(t(GetAssayData(integrated, assay = "integrated", slot = "data")))
+
+# Save expression matrix
+write.csv(expr_matrix, file = "output/integrated_expression_matrix.csv", quote = FALSE)
+
+# --- Step 2: Save metadata (barcodes, clusters, orig.ident etc.) ---
+
+metadata <- integrated@meta.data
+metadata$barcode <- rownames(metadata)
+
+# Save metadata
+write.csv(metadata, file = "output/integrated_metadata.csv", row.names = FALSE, quote = FALSE)
+
+# --- Step 3: (Optional) Save UMAP coordinates ---
+
+umap_coords <- as.data.frame(Embeddings(integrated, "umap"))
+umap_coords$barcode <- rownames(umap_coords)
+
+# Save UMAP coordinates
+write.csv(umap_coords, file = "output/integrated_umap_coordinates.csv", row.names = FALSE, quote = FALSE)
+
+# Save only cluster 8 cell barcodes from dataset1
+DefaultAssay(integrated)<-"RNA" 
+
+df1_subset <- subset(integrated,subset = orig.ident == "dataset1")
+
+cluster8_df1 <- subset(df1_subset,idents = "8")
+
+write.csv(Cells(cluster8_df1), "output/cluster8_barcodes.csv", row.names = FALSE, quote = FALSE)
+```
